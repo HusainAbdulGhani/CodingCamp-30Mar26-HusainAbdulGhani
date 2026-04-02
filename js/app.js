@@ -1,382 +1,317 @@
 /**
- * Expense & Budget Visualizer
- * ===========================
- * Arsitektur: Module Pattern dengan IIFE
- * Prinsip: Single Responsibility per fungsi
- * Storage: localStorage dengan key 'expense_transactions'
+ * Expensio — app.js
+ * TC-1: Vanilla JS  TC-2: localStorage  TC-3: All modern browsers
  */
-
 (() => {
   'use strict';
 
-  // ─────────────────────────────────────────
-  // KONSTANTA & KONFIGURASI
-  // ─────────────────────────────────────────
+  /* ── Constants ── */
+  const STORAGE_KEY = 'evb_transactions';
+  const THEME_KEY   = 'evb_theme';
+  const HIGH_LIMIT  = 500;
 
-  const STORAGE_KEY       = 'expense_transactions';
-  const THEME_KEY         = 'expense_theme';
-  const HIGH_SPEND_LIMIT  = 500_000; // Rp 500.000
-
-  /** Palet warna untuk setiap kategori di chart */
-  const CATEGORY_COLORS = {
-    Makanan:       '#6366f1',
-    Transportasi:  '#10b981',
-    Hiburan:       '#f59e0b',
+  const CAT = {
+    Food:           { color: '#22d3ee', emoji: '🍔' },
+    Transportation: { color: '#a3e635', emoji: '🚗' },
+    Fun:  { color: '#c084fc', emoji: '🎮' },
   };
 
-  // ─────────────────────────────────────────
-  // REFERENSI DOM
-  // ─────────────────────────────────────────
+  const TIPS = [
+    'Tip: Small daily expenses add up fast — keep tracking!',
+    'Tip: Transport costs often exceed Food budgets.',
+    'Tip: Fun spending tends to spike on weekends.',
+    'Tip: Try to keep any single category under 40% of total.',
+  ];
 
+  /* ── DOM ── */
+  const $ = id => document.getElementById(id);
   const dom = {
-    form:            document.getElementById('expenseForm'),
-    itemName:        document.getElementById('itemName'),
-    itemAmount:      document.getElementById('itemAmount'),
-    itemCategory:    document.getElementById('itemCategory'),
-    nameError:       document.getElementById('nameError'),
-    amountError:     document.getElementById('amountError'),
-    categoryError:   document.getElementById('categoryError'),
-    totalAmount:     document.getElementById('totalAmount'),
-    transactionList: document.getElementById('transactionList'),
-    emptyState:      document.getElementById('emptyState'),
-    sortSelect:      document.getElementById('sortSelect'),
-    themeToggle:     document.getElementById('themeToggle'),
-    chartCanvas:     document.getElementById('expenseChart'),
-    chartEmpty:      document.getElementById('chartEmpty'),
+    form:         $('expenseForm'),
+    itemName:     $('itemName'),
+    itemAmount:   $('itemAmount'),
+    itemCategory: $('itemCategory'),
+    catPills:     $('categoryPills'),
+    nameErr:      $('nameError'),
+    amountErr:    $('amountError'),
+    catErr:       $('categoryError'),
+    totalAmount:  $('totalAmount'),
+    txList:       $('transactionList'),
+    emptyState:   $('emptyState'),
+    sortSelect:   $('sortSelect'),
+    themeToggle:  $('themeToggle'),
+    themeIcon:    $('themeIcon'),
+    chartCanvas:  $('expenseChart'),
+    chartEmpty:   $('chartEmpty'),
+    chartCenter:  $('chartCenterLabel'),
+    chartTotal:   $('chartCenterTotal'),
+    toast:        $('toast'),
+    statFood:     $('statMakanan'),
+    statTrans:    $('statTransportasi'),
+    statFun:      $('statHiburan'),
+    statCount:    $('statCount'),
+    pageDate:     $('pageDate'),
+    tipText:      $('tipText'),
   };
 
-  // ─────────────────────────────────────────
-  // STATE
-  // ─────────────────────────────────────────
-
-  /** @type {Array<{id: string, name: string, amount: number, category: string, createdAt: number}>} */
+  /* ── State ── */
   let transactions = [];
+  let chart        = null;
+  let toastTimer   = null;
 
-  /** Instance Chart.js — disimpan agar bisa di-update tanpa re-render penuh */
-  let chartInstance = null;
-
-  // ─────────────────────────────────────────
-  // STORAGE HELPERS
-  // ─────────────────────────────────────────
-
-  /** Muat transaksi dari localStorage. Kembalikan array kosong jika belum ada. */
-  const loadTransactions = () => {
+  /* ── Storage ── */
+  const load = () => {
     try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEY)) ?? [];
-    } catch {
-      return [];
-    }
+      const data = JSON.parse(localStorage.getItem(STORAGE_KEY)) ?? [];
+      // Migrate old "Entertainment" key to "Fun"
+      return data.map(t => ({
+        ...t,
+        category: t.category === 'Entertainment' ? 'Fun' : t.category
+      }));
+    } catch { return []; }
+  };
+  const save = () => localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
+
+  /* ── Utils ── */
+  const usd = n => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(n);
+  const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+
+  const catTotals = () => {
+    const t = {};
+    transactions.forEach(({ category, amount }) => { t[category] = (t[category] ?? 0) + amount; });
+    const labels = Object.keys(t);
+    return { labels, data: labels.map(l => t[l]), colors: labels.map(l => CAT[l]?.color ?? '#94a3b8') };
   };
 
-  /** Simpan state transaksi terkini ke localStorage. */
-  const saveTransactions = () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
+  const legendColor = () =>
+    getComputedStyle(document.documentElement).getPropertyValue('--t2').trim() || '#7b8db0';
+
+  /* ── Toast ── */
+  const toast = (msg, ms = 2400) => {
+    clearTimeout(toastTimer);
+    dom.toast.textContent = msg;
+    dom.toast.classList.add('show');
+    toastTimer = setTimeout(() => dom.toast.classList.remove('show'), ms);
   };
 
-  // ─────────────────────────────────────────
-  // UTILITAS
-  // ─────────────────────────────────────────
-
-  /** Format angka ke format mata uang Rupiah. */
-  const formatRupiah = (amount) =>
-    new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(amount);
-
-  /** Buat ID unik sederhana berbasis timestamp + random. */
-  const generateId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-
-  /**
-   * Hitung total pengeluaran per kategori.
-   * @returns {{ labels: string[], data: number[], colors: string[] }}
-   */
-  const getCategoryTotals = () => {
-    const totals = {};
-    transactions.forEach(({ category, amount }) => {
-      totals[category] = (totals[category] ?? 0) + amount;
+  /* ── Date ── */
+  const renderDate = () => {
+    if (dom.pageDate) dom.pageDate.textContent = new Date().toLocaleDateString('en-US', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
     });
-    const labels = Object.keys(totals);
-    return {
-      labels,
-      data:   labels.map((l) => totals[l]),
-      colors: labels.map((l) => CATEGORY_COLORS[l] ?? '#94a3b8'),
-    };
   };
 
-  // ─────────────────────────────────────────
-  // VALIDASI FORM
-  // ─────────────────────────────────────────
+  /* ── Category pills ── */
+  const initPills = () => {
+    dom.catPills.addEventListener('click', e => {
+      const pill = e.target.closest('.cat-btn');
+      if (!pill) return;
+      dom.catPills.querySelectorAll('.cat-btn').forEach(p => p.setAttribute('aria-pressed', 'false'));
+      pill.setAttribute('aria-pressed', 'true');
+      dom.itemCategory.value = pill.dataset.value;
+      dom.catErr.textContent = '';
+    });
+  };
 
-  /**
-   * Validasi semua field form.
-   * @returns {boolean} true jika valid
-   */
-  const validateForm = () => {
-    let isValid = true;
+  const resetPills = () => {
+    dom.catPills.querySelectorAll('.cat-btn').forEach(p => p.setAttribute('aria-pressed', 'false'));
+    dom.itemCategory.value = '';
+  };
 
-    // Reset error sebelumnya
-    [dom.nameError, dom.amountError, dom.categoryError].forEach((el) => (el.textContent = ''));
-    [dom.itemName, dom.itemAmount, dom.itemCategory].forEach((el) => el.classList.remove('is-invalid'));
+  /* ── Validation ── */
+  const validate = () => {
+    let ok = true;
+    [dom.nameErr, dom.amountErr, dom.catErr].forEach(e => e.textContent = '');
+    [dom.itemName, dom.itemAmount].forEach(e => e.classList.remove('is-invalid'));
 
     if (!dom.itemName.value.trim()) {
-      dom.nameError.textContent = 'Nama item wajib diisi.';
-      dom.itemName.classList.add('is-invalid');
-      isValid = false;
+      dom.nameErr.textContent = 'Item name is required.';
+      dom.itemName.classList.add('is-invalid'); ok = false;
     }
-
-    const amount = parseFloat(dom.itemAmount.value);
-    if (!dom.itemAmount.value || isNaN(amount) || amount <= 0) {
-      dom.amountError.textContent = 'Masukkan jumlah yang valid (> 0).';
-      dom.itemAmount.classList.add('is-invalid');
-      isValid = false;
+    const amt = parseFloat(dom.itemAmount.value);
+    if (!dom.itemAmount.value || isNaN(amt) || amt <= 0) {
+      dom.amountErr.textContent = 'Enter a valid amount (> 0).';
+      dom.itemAmount.classList.add('is-invalid'); ok = false;
     }
-
     if (!dom.itemCategory.value) {
-      dom.categoryError.textContent = 'Pilih kategori terlebih dahulu.';
-      dom.itemCategory.classList.add('is-invalid');
-      isValid = false;
+      dom.catErr.textContent = 'Please select a category.'; ok = false;
     }
-
-    return isValid;
+    return ok;
   };
 
-  // ─────────────────────────────────────────
-  // RENDER: TOTAL
-  // ─────────────────────────────────────────
-
-  /** Perbarui tampilan total pengeluaran di header. */
+  /* ── Render: Total ── */
   const renderTotal = () => {
-    const total = transactions.reduce((sum, t) => sum + t.amount, 0);
-    dom.totalAmount.textContent = formatRupiah(total);
-  };
+    const total = transactions.reduce((s, t) => s + t.amount, 0);
+    dom.totalAmount.textContent = usd(total);
+    dom.totalAmount.classList.remove('bump');
+    void dom.totalAmount.offsetWidth;
+    dom.totalAmount.classList.add('bump');
+    setTimeout(() => dom.totalAmount.classList.remove('bump'), 200);
 
-  // ─────────────────────────────────────────
-  // RENDER: DAFTAR TRANSAKSI
-  // ─────────────────────────────────────────
-
-  /**
-   * Urutkan salinan array transaksi berdasarkan pilihan sort.
-   * @param {typeof transactions} list
-   * @returns {typeof transactions}
-   */
-  const getSortedTransactions = (list) => {
-    const sorted = [...list];
-    switch (dom.sortSelect.value) {
-      case 'amount-asc':  return sorted.sort((a, b) => a.amount - b.amount);
-      case 'amount-desc': return sorted.sort((a, b) => b.amount - a.amount);
-      case 'category':    return sorted.sort((a, b) => a.category.localeCompare(b.category));
-      default:            return sorted.sort((a, b) => b.createdAt - a.createdAt); // terbaru
+    if (dom.chartTotal) {
+      dom.chartTotal.textContent = total > 0
+        ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 }).format(total)
+        : '$0';
     }
   };
 
-  /**
-   * Buat elemen DOM untuk satu item transaksi.
-   * @param {{ id: string, name: string, amount: number, category: string }} transaction
-   * @returns {HTMLElement}
-   */
-  const createTransactionElement = ({ id, name, amount, category }) => {
-    const isHighSpend = amount > HIGH_SPEND_LIMIT;
+  /* ── Render: Stats ── */
+  const renderStats = () => {
+    const t = { Food: 0, Transportation: 0, Fun: 0 };
+    transactions.forEach(({ category, amount }) => { if (t[category] !== undefined) t[category] += amount; });
+    dom.statCount.textContent = transactions.length;
+    dom.statFood.textContent  = usd(t.Food);
+    dom.statTrans.textContent = usd(t.Transportation);
+    dom.statFun.textContent   = usd(t.Fun);
+  };
 
-    const item = document.createElement('div');
-    item.className = `transaction-item${isHighSpend ? ' is-high-spend' : ''}`;
-    item.dataset.id = id;
+  /* ── Render: Tip ── */
+  const renderTip = () => {
+    if (!dom.tipText) return;
+    if (!transactions.length) { dom.tipText.textContent = 'Start tracking to get spending insights.'; return; }
+    const t = { Food: 0, Transportation: 0, Fun: 0 };
+    transactions.forEach(({ category, amount }) => { if (t[category] !== undefined) t[category] += amount; });
+    const top = Object.entries(t).sort((a,b) => b[1]-a[1])[0][0];
+    const map = { Food: TIPS[0], Transportation: TIPS[1], Fun: TIPS[2] };
+    dom.tipText.textContent = map[top] ?? TIPS[3];
+  };
 
-    item.innerHTML = `
-      <div class="item-info">
-        <div class="item-name" title="${name}">${name}</div>
-        <div class="item-meta">
-          <span class="item-category">${category}</span>
-          <span class="high-spend-badge">⚠ Pengeluaran Besar</span>
+  /* ── Render: List ── */
+  const sorted = list => {
+    const c = [...list];
+    switch (dom.sortSelect.value) {
+      case 'amount-asc':  return c.sort((a,b) => a.amount - b.amount);
+      case 'amount-desc': return c.sort((a,b) => b.amount - a.amount);
+      case 'category':    return c.sort((a,b) => a.category.localeCompare(b.category,'en'));
+      default:            return c.sort((a,b) => b.createdAt - a.createdAt);
+    }
+  };
+
+  const makeTxEl = ({ id, name, amount, category }) => {
+    const isHigh = amount > HIGH_LIMIT;
+    const el = document.createElement('div');
+    el.className = `tx-item${isHigh ? ' is-high' : ''}`;
+    el.setAttribute('role', 'listitem');
+    el.dataset.id = id;
+
+    // safe name
+    const safe = document.createElement('span');
+    safe.textContent = name;
+    const safeName = safe.innerHTML;
+
+    el.innerHTML = `
+      <div class="tx-icon" data-cat="${category}" aria-hidden="true">${CAT[category]?.emoji ?? '💰'}</div>
+      <div class="tx-info">
+        <div class="tx-name"></div>
+        <div class="tx-meta">
+          <span class="tx-cat" data-cat="${category}">${category}</span>
+          <span class="tx-high-badge">⚠ High Spend</span>
         </div>
       </div>
-      <span class="item-amount">${formatRupiah(amount)}</span>
-      <button class="btn-delete" data-id="${id}" aria-label="Hapus ${name}">✕</button>
-    `;
+      <div class="tx-right">
+        <span class="tx-amount">${usd(amount)}</span>
+        <button class="btn-del" data-id="${id}" aria-label="Delete ${safeName}" type="button">✕</button>
+      </div>`;
 
-    return item;
+    el.querySelector('.tx-name').textContent = name;
+    return el;
   };
 
-  /** Render ulang seluruh daftar transaksi ke DOM. */
-  const renderTransactionList = () => {
-    const sorted = getSortedTransactions(transactions);
-
-    // Tampilkan/sembunyikan empty state
-    dom.emptyState.style.display = sorted.length === 0 ? 'block' : 'none';
-
-    // Hapus item lama (kecuali empty state)
-    const existingItems = dom.transactionList.querySelectorAll('.transaction-item');
-    existingItems.forEach((el) => el.remove());
-
-    // Render item baru
-    const fragment = document.createDocumentFragment();
-    sorted.forEach((t) => fragment.appendChild(createTransactionElement(t)));
-    dom.transactionList.appendChild(fragment);
+  const renderList = () => {
+    const list = sorted(transactions);
+    dom.emptyState.style.display = list.length ? 'none' : 'flex';
+    dom.txList.querySelectorAll('.tx-item').forEach(e => e.remove());
+    if (!list.length) return;
+    const frag = document.createDocumentFragment();
+    list.forEach(t => frag.appendChild(makeTxEl(t)));
+    dom.txList.appendChild(frag);
   };
 
-  // ─────────────────────────────────────────
-  // RENDER: CHART
-  // ─────────────────────────────────────────
-
-  /** Inisialisasi Chart.js Pie Chart pertama kali. */
+  /* ── Render: Chart ── */
   const initChart = () => {
-    const { labels, data, colors } = getCategoryTotals();
-
-    chartInstance = new Chart(dom.chartCanvas, {
+    chart = new Chart(dom.chartCanvas, {
       type: 'doughnut',
-      data: {
-        labels,
-        datasets: [{
-          data,
-          backgroundColor: colors,
-          borderWidth: 2,
-          borderColor: 'transparent',
-          hoverOffset: 8,
-        }],
-      },
+      data: { labels: [], datasets: [{ data: [], backgroundColor: [], borderWidth: 0, hoverOffset: 10 }] },
       options: {
-        responsive: true,
-        maintainAspectRatio: true,
+        responsive: true, maintainAspectRatio: true, cutout: '68%',
         plugins: {
           legend: {
             position: 'bottom',
-            labels: {
-              padding: 16,
-              font: { size: 12, family: "'Segoe UI', system-ui, sans-serif" },
-              color: getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim(),
-            },
+            labels: { padding: 16, usePointStyle: true, pointStyle: 'circle', font: { size: 11, family: "'Inter', sans-serif", weight: '600' }, color: legendColor() }
           },
-          tooltip: {
-            callbacks: {
-              label: (ctx) => ` ${formatRupiah(ctx.parsed)}`,
-            },
-          },
+          tooltip: { callbacks: { label: ctx => `  ${usd(ctx.parsed)}` } }
         },
-      },
+        animation: { duration: 450, easing: 'easeInOutQuart' }
+      }
     });
   };
 
-  /**
-   * Perbarui data chart tanpa re-render penuh (performa optimal).
-   * Dipanggil hanya saat ada perubahan data.
-   */
   const updateChart = () => {
-    const { labels, data, colors } = getCategoryTotals();
-    const hasData = data.length > 0;
-
-    // Tampilkan/sembunyikan pesan kosong
-    dom.chartEmpty.style.display = hasData ? 'none' : 'block';
-    dom.chartCanvas.style.display = hasData ? 'block' : 'none';
-
-    if (!hasData) return;
-
-    // Update data chart secara efisien
-    chartInstance.data.labels = labels;
-    chartInstance.data.datasets[0].data = data;
-    chartInstance.data.datasets[0].backgroundColor = colors;
-
-    // Sinkronkan warna label legend dengan tema aktif
-    chartInstance.options.plugins.legend.labels.color =
-      getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#6b7280';
-
-    chartInstance.update('active');
+    const { labels, data, colors } = catTotals();
+    const has = data.length > 0;
+    dom.chartEmpty.style.display         = has ? 'none'  : 'block';
+    dom.chartCanvas.style.display        = has ? 'block' : 'none';
+    dom.chartCenter.style.display        = has ? 'block' : 'none';
+    if (!has) return;
+    chart.data.labels                         = labels;
+    chart.data.datasets[0].data              = data;
+    chart.data.datasets[0].backgroundColor   = colors;
+    chart.options.plugins.legend.labels.color = legendColor();
+    chart.update('active');
   };
 
-  // ─────────────────────────────────────────
-  // AKSI: TAMBAH TRANSAKSI
-  // ─────────────────────────────────────────
-
-  /** Tangani submit form — validasi, buat objek, simpan, render. */
-  const handleAddTransaction = (event) => {
-    event.preventDefault();
-    if (!validateForm()) return;
-
-    const newTransaction = {
-      id:        generateId(),
-      name:      dom.itemName.value.trim(),
-      amount:    parseFloat(dom.itemAmount.value),
-      category:  dom.itemCategory.value,
-      createdAt: Date.now(),
+  /* ── Actions ── */
+  const onAdd = e => {
+    e.preventDefault();
+    if (!validate()) return;
+    const tx = {
+      id: uid(), name: dom.itemName.value.trim(),
+      amount: parseFloat(dom.itemAmount.value),
+      category: dom.itemCategory.value, createdAt: Date.now()
     };
-
-    transactions.push(newTransaction);
-    saveTransactions();
-    renderAll();
-    dom.form.reset();
-    dom.itemName.focus();
+    transactions.push(tx);
+    save(); renderAll();
+    toast(tx.amount > HIGH_LIMIT ? `⚠ High spend — "${tx.name}" added` : `✓ "${tx.name}" added`);
+    dom.form.reset(); resetPills(); dom.itemName.focus();
   };
 
-  // ─────────────────────────────────────────
-  // AKSI: HAPUS TRANSAKSI
-  // ─────────────────────────────────────────
-
-  /**
-   * Tangani klik hapus via event delegation pada container list.
-   * @param {MouseEvent} event
-   */
-  const handleDeleteTransaction = (event) => {
-    const deleteBtn = event.target.closest('.btn-delete');
-    if (!deleteBtn) return;
-
-    const { id } = deleteBtn.dataset;
-    transactions = transactions.filter((t) => t.id !== id);
-    saveTransactions();
-    renderAll();
+  const onDelete = e => {
+    const btn = e.target.closest('.btn-del');
+    if (!btn) return;
+    const del = transactions.find(t => t.id === btn.dataset.id);
+    transactions = transactions.filter(t => t.id !== btn.dataset.id);
+    save(); renderAll();
+    if (del) toast(`🗑 "${del.name}" removed`);
   };
 
-  // ─────────────────────────────────────────
-  // AKSI: DARK MODE TOGGLE
-  // ─────────────────────────────────────────
-
-  /** Terapkan tema ke <html> dan simpan preferensi. */
-  const applyTheme = (theme) => {
+  /* ── Theme ── */
+  const applyTheme = theme => {
     document.documentElement.setAttribute('data-theme', theme);
-    dom.themeToggle.textContent = theme === 'dark' ? '☀️' : '🌙';
+    dom.themeIcon.textContent = theme === 'dark' ? '🌙' : '☀️';
+    dom.themeToggle.setAttribute('aria-label', theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
     localStorage.setItem(THEME_KEY, theme);
   };
 
-  /** Toggle antara tema terang dan gelap. */
-  const handleThemeToggle = () => {
-    const current = document.documentElement.getAttribute('data-theme');
-    applyTheme(current === 'dark' ? 'light' : 'dark');
-    // Perbarui warna legend chart setelah tema berubah
-    if (chartInstance) updateChart();
-  };
+  /* ── Orchestrator ── */
+  const renderAll = () => { renderTotal(); renderStats(); renderList(); updateChart(); renderTip(); };
 
-  // ─────────────────────────────────────────
-  // RENDER SEMUA (ORCHESTRATOR)
-  // ─────────────────────────────────────────
-
-  /** Render ulang semua komponen UI sekaligus. */
-  const renderAll = () => {
-    renderTotal();
-    renderTransactionList();
-    updateChart();
-  };
-
-  // ─────────────────────────────────────────
-  // INISIALISASI APLIKASI
-  // ─────────────────────────────────────────
-
+  /* ── Init ── */
   const init = () => {
-    // Muat data dari localStorage
-    transactions = loadTransactions();
-
-    // Terapkan tema tersimpan
-    const savedTheme = localStorage.getItem(THEME_KEY) ?? 'light';
-    applyTheme(savedTheme);
-
-    // Inisialisasi chart
+    transactions = load();
+    applyTheme(localStorage.getItem(THEME_KEY) ?? 'dark');
+    renderDate();
     initChart();
-
-    // Render awal
+    initPills();
     renderAll();
 
-    // Pasang event listeners
-    dom.form.addEventListener('submit', handleAddTransaction);
-    dom.transactionList.addEventListener('click', handleDeleteTransaction); // event delegation
-    dom.sortSelect.addEventListener('change', renderTransactionList);
-    dom.themeToggle.addEventListener('click', handleThemeToggle);
+    dom.form.addEventListener('submit', onAdd);
+    dom.txList.addEventListener('click', onDelete);
+    dom.sortSelect.addEventListener('change', renderList);
+    dom.themeToggle.addEventListener('click', () => {
+      const cur = document.documentElement.getAttribute('data-theme');
+      applyTheme(cur === 'dark' ? 'light' : 'dark');
+      if (chart) updateChart();
+    });
   };
 
-  // Jalankan saat DOM siap
   document.addEventListener('DOMContentLoaded', init);
-
 })();
